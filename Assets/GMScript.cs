@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using TMPro;
@@ -21,6 +22,13 @@ public class GMScript : MonoBehaviour
     private int _difficulty;
     private int _fixedUpdateFramesToWait = 10;
     private int _fixedUpdateCount;
+
+    // My added information
+    string logFile;
+    int easyMode = 0;
+    [SerializeField]int[] totalsCleared;
+    int numCleared; // Number cleared in the current pack (1-4 lines unless you clear too fast)
+    bool currClearing; // If currently in process of clearing lines
 
     // ReSharper disable once InconsistentNaming
     public bool DEBUG_MODE;
@@ -71,6 +79,87 @@ public class GMScript : MonoBehaviour
         _dirty = true;
         _initialized = false;
         InitializePieces();
+
+        // Adaptivity lines to add store past few games info
+        int[] singleClears = new int[5];
+        int[] doubleClears = new int[5];
+        int[] tripleClears = new int[5];
+        int[] tetris = new int[5];
+        int endAdded = 0;
+
+        // Initializes numbers as -1 if note enough games played
+        for(int i = 0; i < 5; i++) {
+            singleClears[i] = -1;
+            doubleClears[i] = -1;
+            tripleClears[i] = -1;
+            tetris[i] = -1;
+        }
+
+        // Checks the current data stored in the user log file
+        logFile = Directory.GetCurrentDirectory() + "\\Assets\\user.log";
+        totalsCleared = new int[4];
+        totalsCleared = totalsCleared.Select(x => 0).ToArray();
+        if(File.Exists(logFile)) {
+            StreamReader reader = File.OpenText(logFile);
+            string s = "";
+            while((s = reader.ReadLine()) != null) {
+                string[] words = s.Split(" ", 4);
+                int wordNum = 0;
+                foreach(string word in words) {
+                    int val = Int32.Parse(word);
+                    if(wordNum == 0) {
+                        singleClears[endAdded] = val;
+                    } else if(wordNum == 1) {
+                        doubleClears[endAdded] = val;
+                    } else if(wordNum == 2) {
+                        tripleClears[endAdded] = val;
+                    } else if(wordNum == 3) {
+                        tetris[endAdded] = val;
+                    } else { // More words than types of clears available
+                        break;
+                    }
+                    wordNum++;
+                    
+                }
+                endAdded = (endAdded + 1) % 5;
+                Debug.Log($"Single:{words[0]}, Double:{words[1]}, Triple:{words[2]}, Tetris:{words[3]}");
+            }
+            reader.Close();
+
+            // Determine if assistance needed
+            int[] totals = new int[4];
+            int numUsed = 0;
+            for(int i = 0; i < tetris.Length; i++) {
+                if(tetris[i] == -1) { // means run invalid
+                    continue;
+                } else {
+                    numUsed++;
+                    totals[0] += singleClears[i];
+                    totals[1] += doubleClears[i];
+                    totals[2] += tripleClears[i];
+                    totals[3] += tetris[i];
+                }
+            }
+            // Noramalizes information (for all but tetris)
+            for(int i = 0; i < totals.Length - 1; i++) {
+                if(totals[i] > 0) {
+                    totals[i] = totals[i] / numUsed;
+                }
+            }
+
+            if(numUsed == 0 || totals[3] > 0 || totals[0] + 2*totals[1] + 3*totals[2] >= 9) {
+                // No assistance needed, so do nothing
+            } else if(totals[2] > 0 || totals[0] + 2*totals[1] >= 4) {
+                easyMode = 1; // Halfs difficulty increase rate
+            } else {
+                easyMode = 2; // 1/3 difficulty increase rate + no random blocks
+            }
+
+            Debug.Log("EasyMode: " + easyMode);
+
+        } else {
+            Debug.Log("File doesn't exists.");
+        }
     }
 
 
@@ -137,7 +226,7 @@ public class GMScript : MonoBehaviour
         _myChunk = newChunk;
         return true;
     }
-    
+
     bool CheckKillChunk()
     {
         if (null == _myChunk) return false;
@@ -156,7 +245,8 @@ public class GMScript : MonoBehaviour
             { 
                 _score += 1;
                if (DEBUG_MODE) Debug.Log($"KILL ROW: {row}! Score: {_score}");
-               
+               numCleared++;
+               currClearing = true;
                return KillRow(row);
             }
         }
@@ -314,20 +404,40 @@ public class GMScript : MonoBehaviour
         if (_inARow > _difficulty)
         {
             _difficulty = _inARow;
-            if (_fixedUpdateFramesToWait > 1)
+            if (_fixedUpdateFramesToWait > 2)
             {
-                _fixedUpdateFramesToWait--;
+                if(easyMode == 0) {
+                    _fixedUpdateFramesToWait-= 2;
+                } else if(easyMode == 1) {
+                    _fixedUpdateFramesToWait-= 1;
+                } // Else if easyMode == 2 do not increase speed
             }
         }
 
         if (CheckKillChunk())
         {
             _inARow++;
-            MakeRandomAngryChunk();
+            if(easyMode != 2) {
+                MakeRandomAngryChunk();
+            }
         }
         else _inARow = 0;
         infoText.text = $"PTS:{_score}\n\nMAX:{_difficulty}\n\nCURRIC\n576";
         _fixedUpdateCount = 1;
+        if(!currClearing && numCleared > 0) {
+            if(numCleared == 1) {
+                totalsCleared[0]++;
+            } else if(numCleared == 2) {
+                totalsCleared[1]++;
+            } else if(numCleared == 3) {
+                totalsCleared[2]++;
+            } else {
+                totalsCleared[3]++;
+            }
+            Debug.Log(numCleared);
+            numCleared = 0;
+        }
+        currClearing = false;
     }
     
     void Update()
@@ -339,6 +449,16 @@ public class GMScript : MonoBehaviour
             if (!MakeNewPiece(0,_maxBy))
             {   
                 Debug.Log("NO VALID MOVE");
+                // Writes to file the number of moves done
+                StreamWriter writer = new(logFile, append: true);
+                string s = "";
+                for(int i = 0; i < 4; i++) {
+                    s += totalsCleared[i] + " ";
+                }
+
+                writer.WriteLineAsync(s);
+                writer.Close();
+                Debug.Log($"Write Finished. Lines cleared: {totalsCleared[0]} {totalsCleared[1]} {totalsCleared[2]} {totalsCleared[3]}");
                 Debug.Break();
             }
         }
